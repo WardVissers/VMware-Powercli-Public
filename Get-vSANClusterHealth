@@ -1,0 +1,146 @@
+<#
+.NOTES
+===========================================================================
+ Created by:    Ward Vissers
+ Idea/Based-On:  Get-vSANInfo 
+       Author : Graham Barker - @VirtualG_UK
+       Contributor : Edgar Sanchez - @edmsanchez13
+       Contributor : Ariel Sanchez - @arielsanchezmor
+    
+ Blog:          www.wardvissers.nl
+ Twitter:       @wardvissers
+ Version:       1.0
+    ===========================================================================
+.DESCRIPTION
+     Will get inventory information for a vSAN Cluster
+.EXAMPLE
+    Get-vSanHealthClusters.ps1
+#>
+
+# Include function('s)
+. D:\Automation\Scripts\Functions\Connect-vSphere.ps1
+
+# Run Once
+# Set-PowerCLIConfiguration -Scope User -ParticipateInCEIP $true -InvalidCertificateAction Ignore
+
+# Connect vCenter 
+Connect-vSphere 
+
+#param(
+#        [Parameter(Mandatory=$false)][String]$Cluster
+#    )
+
+$vsanclusters = get-cluster  | Where-Object  {$_.VsanEnabled -eq $true} # | Out-GridView -OutputMode Single -Title "Select vSAN Cluster" # If you what to do it Manual
+
+$Overview = @()
+ForEach ($cluster in $vsanclusters){
+
+$clusterstatus = Get-Cluster $cluster | Get-VsanObject | Select Cluster,TimeOfCheck,ComplianceStatus,StoragePolicy,VsanHealth
+$clusterconfig = Get-VsanClusterConfiguration -Cluster $cluster.name
+
+$vchs = Get-VSANView -Id "VsanVcClusterHealthSystem-vsan-cluster-health-system"
+$cluster_view = (Get-Cluster -Name $Cluster).ExtensionData.MoRef
+$results = $vchs.VsanQueryVcClusterHealthSummary($cluster_view,$null,$null,$true,$null,$null,'defaultView')
+$resultsSystemVersion = $vchs.VsanVcClusterQueryVerifyHealthSystemVersions($cluster_view)
+  
+    # General
+    $vSANSpace = Get-VsanSpaceUsage -Cluster $cluster.name
+    $vsanvms = (Get-Datastore -RelatedObject $cluster | Where-Object {$_.Type -eq "vsan"} | Get-VM)
+    
+    # Fix View Encryption 
+    #$vsanview = Get-VsanView -Id "VsanVcClusterConfigSystem-vsan-cluster-config-system"
+    #$encryptionenabled = $vsanview.VsanClusterGetConfig($cluster.ExtensionData.MoRef).DataEncryptionConfig.EncryptionEnabled
+    
+    # Fix hostFailuresToTolerate
+    # $vSANstoragepolicy= (Get-SpbmStoragePolicy -Name $clusterconfig.StoragePolicy) 
+    # $SPBM = $vSANstoragepolicy | Select-Object Name, AnyOfRuleSets
+    # $Attributes = @( $SPBM | ForEach-Object { $_.AnyOfRuleSets } | Select-Object -ExpandProperty AllofRules)
+    
+    #Get cached vSAN health results
+    $hcresults = Test-VsanClusterHealth -UseCache -Cluster $cluster
+
+    # Get SPBM Metrics
+    #$policies = Get-SpbmStoragePolicy -Namespace "VSAN" | Where-Object ($_.Name -eq $clusterconfig.StoragePolicy) | Select-Object Name,AnyOfRuleSets
+    #$vsanspbmcount = $policies.Count
+    $vmcomplianceresults = Get-SpbmEntityConfiguration -VM $vsanvms
+    $defaultpolicycount = ($vmcomplianceresults | Where-Object {$_.StoragePolicy.Name -eq "vSAN Default Storage Policy" -and $_.ComplianceStatus -ne "notApplicable"}).Count
+    $vmdkcomplianceresults = Get-SpbmEntityConfiguration -HardDisk (Get-HardDisk -VM $vsanvms)
+    $vmdkcount = $vmdkcomplianceresults.Count
+    $vmdksoutofcompliancecount = ($vmdkcomplianceresults | Where-Object {$_.ComplianceStatus -eq "nonCompliant"}).Count
+    $pctoutofcompliance = $vmdksoutofcompliancecount / $vmdkcount * 100
+
+    # Create OutPut For HTML E-mail Rapport
+    $myObj = @()
+    # $myObj = "" | Select Cluster,Hosts,VMs,vSANVersion,vSanUpgrade,HealthCheckEnabled,PerformanceServiceEnabled,StretchedClusterEnabled,TimeOfHclUpdate,StoragePolicy,PerformanceStatsStoragePolicy,vSanDiskClaimMode,faultdomaincount,vSanFailureToTolerate,ObjectOutOfcompliance,vSanOverallHealth,vSanOverallHealthDescription,vSanHealthScore,ComponentLimitHealth,OpenIssue,vSanFreeSpaceTB,vSanCapacityTB
+    $myObj = "" | Select Cluster,Hosts,VMs,vSANVersion,vSanUpgrade,HealthCheckEnabled,TimeOfHclUpdate,StoragePolicy,vSanDiskClaimMode,faultdomaincount,ObjectOutOfcompliance,vSanOverallHealth,vSanOverallHealthDescription,vSanHealthScore,ComponentLimitHealth,OpenIssue,vSanFreeSpaceTB,vSanCapacityTB
+    
+    $myObj.Cluster = $cluster.name
+    $myObj.Hosts = (Get-VMHost -Location $cluster).Count
+    $myObj.VMs = $vsanvms.Count
+    $myObj.vSANVersion = $resultsSystemVersion.VcVersion
+    $myObj.vSanUpgrade = $resultsSystemVersion.UpgradePossible
+    $myObj.HealthCheckEnabled  = $($clusterconfig.HealthCheckEnabled)
+    # $myObj.IscsiTargetServiceEnabled = $($clusterconfig.IscsiTargetServiceEnabled)
+    # $myObj.PerformanceServiceEnabled =  $($clusterconfig.PerformanceServiceEnabled)
+    # $myObj.SpaceEfficiencyEnabled =  $($clusterconfig.SpaceEfficiencyEnabled)
+    # $myObj.StretchedClusterEnabled = $($clusterconfig.StretchedClusterEnabled)
+    $myObj.TimeOfHclUpdate = $($clusterconfig.TimeOfHclUpdate)
+    # $myObj.VsanEsaEnabled = $($clusterconfig.VsanEsaEnabled)
+    # $myObj.VsanMaxEnabled = $($clusterconfig.VsanMaxEnabled)
+    $myObj.StoragePolicy = $($clusterconfig.StoragePolicy)
+    # $myObj.PerformanceStatsStoragePolicy  = $($clusterconfig.PerformanceStatsStoragePolicy)
+    # $myObj.HostRebuildReservationState  = $($clusterconfig.HostRebuildReservationState)
+    # $myObj.VsanOperationReservationState = $($clusterconfig.VsanOperationReservationState) 
+    $myObj.vSanDiskClaimMode = $($clusterconfig.VsanDiskClaimMode)
+    # $myObj.SpaceEfficiencyEnabled = $($clusterconfig.SpaceEfficiencyEnabled)
+    # $myObj.SpaceCompressionEnabled = $($clusterconfig.SpaceCompressionEnabled )
+    # $myObj.encryptionenabled = $encryptionenabled
+    $myObj.faultdomaincount= (Get-VsanFaultDomain -Cluster $cluster).Count
+    # $myObj.vSanFailureToTolerate = $attributes | Where-Object { $_.Capability -like "*VSAN.hostFailuresToTolerate*" } | Select-Object -ExpandProperty Value
+    # Write-Host "vSAN Health check:  $($hcresults.OverallHealthStatus) $($hcresults.OverallHealthDescription) [$($hcresults.TimeOfTest)]"
+    # $myObj.vSANPolicyCount =  $vsanspbmcount
+    # $myObj.vSANdefaultpolicyVMcount= $defaultpolicycount
+    $myObj.ObjectOutOfcompliance = $pctoutofcompliance
+    # $myObj.TimeOfCheck = $clusterstatus.TimeOfCheck # Fix Group Opjecten werkt niet naar HTML Rapport
+    # $myObj.GroupComplianceStatus = $results.Groups # Fix Group Opjecten werkt niet naar HTML Rapport
+    $myObj.vSanOverallHealth = $results.OverallHealth
+    $myObj.vSanOverallHealthDescription = $results.OverallHealthDescription
+    $myObj.vSanHealthScore = $results.HealthScore
+    $myObj.ComponentLimitHealth = $($hcresults.LimitHealth.ComponentLimitHealth)
+    $myObj.OpenIssue  = $resultsSystemVersion.IssueFound
+    $myObj.vSanFreeSpaceTB =  [math]::Round($vSANSpace.FreeSpaceGB/1024)
+    $myObj.vSanCapacityTB= [math]::Round($vSANSpace.CapacityGB/1024)
+    $myobj
+    $Overview += $myobj
+}
+
+$Data = $Overview | ConvertTo-Html -Head "$style" –title "vSAN Health Rapport " –body "<H2>vSAN Health Rapport</H2>"   
+######################
+# E-mail HTML output #
+######################
+# $smtp variable contain the name/ip of your email server ## 
+# $to contain the email id whom you want to send email ### 
+# $from contain email of sender ### 
+# $Subject contain subject of the email.  
+# In Body we are defining some HTML coding in to our email message body 
+# <b> means BOLD  
+#<br> means Break go to next Line 
+#<a href> provide a link to the text 
+# <font color=red> , give the color to the font  
+
+$date=get-date
+
+$subject = "VMware vSAN Health Rapport $date"
+
+$body = "VMware vSAN Health Rapport $date" 
+
+$body += "$Data" 
+
+$From = "youremailadres@here"
+$To = "youremailadres@here"
+
+# The password is an app-specific password if you have 2-factor-auth enabled
+Send-MailMessage -From $From -To $To -Subject $Subject -Body $Body -SmtpServer "YourSMTP Server" -port 587 -UseSsl
+
+# Disconnect-vCenter
+Disconnect-vSphere
